@@ -10,7 +10,7 @@ from fakes import FakeClient
 
 from tardis_dataloader import cli
 from tardis_dataloader.config import Settings
-from tardis_dataloader.datasets import LIQUIDATIONS
+from tardis_dataloader.datasets import FUTURES_TRADES, LIQUIDATIONS
 
 DAYS = ["2022-01-01", "2022-01-02", "2022-01-03"]
 
@@ -27,12 +27,14 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return src
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, client: FakeClient, *args: str) -> int:
+def _run(
+    monkeypatch: pytest.MonkeyPatch, client: FakeClient, *args: str, dataset: str = "liquidations"
+) -> int:
     def get_client(**kwargs: Any) -> FakeClient:
         return client
 
     monkeypatch.setattr(clickhouse_connect, "get_client", get_client)
-    return cli.main(["liquidations", *args])
+    return cli.main([dataset, *args])
 
 
 def _inserted_days(client: FakeClient) -> list[str]:
@@ -92,3 +94,20 @@ def test_stops_at_first_failed_file(data_root: Path, monkeypatch: pytest.MonkeyP
 def test_rejects_bad_arguments(args: list[str]) -> None:
     with pytest.raises(SystemExit):
         cli.parse_args(["liquidations", *args])
+
+
+def test_last_day_caps_files_even_with_later_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / FUTURES_TRADES.source_dir
+    src.mkdir(parents=True)
+    body = (",".join(FUTURES_TRADES.column_names) + "\n").encode()
+    for day in ["2025-09-10", "2025-09-11", "2025-10-01"]:
+        (src / f"{day}_PERPETUALS.csv.gz").write_bytes(gzip.compress(body))
+    settings = Settings("localhost", 8123, "default", "", "market", tmp_path)
+    monkeypatch.setattr(cli, "load_settings", lambda: settings)
+
+    for args in ([], ["--end", "2025-12-31"]):
+        client = FakeClient(written=0)
+        assert _run(monkeypatch, client, *args, dataset="futures-trades") == 0
+        assert _inserted_days(client) == ["2025-09-10"]

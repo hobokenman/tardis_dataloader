@@ -9,7 +9,7 @@ import pytest
 from clickhouse_connect.driver.client import Client
 from fakes import FakeClient
 
-from tardis_dataloader.datasets import LIQUIDATIONS
+from tardis_dataloader.datasets import FUTURES_TRADES, LIQUIDATIONS
 from tardis_dataloader.files import SourceFile
 from tardis_dataloader.loader import Loader, LoadError
 
@@ -142,3 +142,9 @@ def test_table_columns_match_tardis_header_order() -> None:
     assert "`timestamp_us` Int64 EPHEMERAL" in sql
     assert "fromUnixTimestamp64Micro(`local_timestamp_us`, 'UTC')" in sql
     assert "PARTITION BY toDate(local_timestamp)" in sql
+
+
+def test_trade_tables_store_numeric_ids() -> None:
+    sql = FUTURES_TRADES.create_table_sql("market")
+    assert "`id` UInt64 CODEC(Delta, ZSTD(1))" in sql
+    assert FUTURES_TRADES.column_names == LIQUIDATIONS.column_names

@@ -44,16 +44,16 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     dataset = DATASETS[args.dataset]
 
-    files = discover(
-        settings.data_root / dataset.source_dir, dataset.file_kind, args.start, args.end
-    )
+    end = min((d for d in (args.end, dataset.last_day) if d), default=None)
+    files = discover(settings.data_root / dataset.source_dir, dataset.file_kind, args.start, end)
     client = clickhouse_connect.get_client(
         host=settings.host,
         port=settings.port,
         username=settings.user,
         password=settings.password,
         database=settings.database,
-        send_receive_timeout=3600,
+        # Large trade files can stream for a long time before the server replies.
+        send_receive_timeout=6 * 3600,
     )
     loader = Loader(client, settings.database, dataset)
     if not args.dry_run:

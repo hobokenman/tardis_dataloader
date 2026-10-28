@@ -15,6 +15,7 @@ which lets a file be reloaded idempotently by replacing its partition.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 
 MICROS = "MICROS"
@@ -33,6 +34,8 @@ class Dataset:
     # SQL predicate for source rows that must not be stored; they are deleted in
     # staging before the swap and counted in the load log's ``dropped`` column.
     invalid_rows: str = "0"
+    # Files after this day are never loaded, even without --end.
+    last_day: dt.date | None = None
 
     @property
     def column_names(self) -> list[str]:
@@ -84,7 +87,41 @@ LIQUIDATIONS = Dataset(
     invalid_rows="NOT (price > 0 AND amount > 0)",
 )
 
-DATASETS: dict[str, Dataset] = {d.name: d for d in (LIQUIDATIONS,)}
+TRADE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("exchange", "LowCardinality(String)"),
+    ("symbol", "LowCardinality(String)"),
+    ("timestamp", MICROS),
+    ("local_timestamp", MICROS),
+    # Binance trade ids are numeric and increase per symbol, so Delta packs them well.
+    ("id", "UInt64 CODEC(Delta, ZSTD(1))"),
+    ("side", "Enum8('unknown' = 0, 'buy' = 1, 'sell' = 2)"),
+    ("price", "Float64 CODEC(ZSTD(1))"),
+    ("amount", "Float64 CODEC(ZSTD(1))"),
+)
+
+SPOT_TRADES = Dataset(
+    name="spot-trades",
+    source_dir="binance/trades",
+    file_kind="SPOT",
+    table="tardis_binance_spot_trades",
+    columns=TRADE_COLUMNS,
+    order_by=("symbol", "timestamp"),
+    invalid_rows="NOT (price > 0 AND amount > 0)",
+    last_day=dt.date(2025, 9, 10),
+)
+
+FUTURES_TRADES = Dataset(
+    name="futures-trades",
+    source_dir="binance-futures/trades",
+    file_kind="PERPETUALS",
+    table="tardis_binance_futures_trades",
+    columns=TRADE_COLUMNS,
+    order_by=("symbol", "timestamp"),
+    invalid_rows="NOT (price > 0 AND amount > 0)",
+    last_day=dt.date(2025, 9, 10),
+)
+
+DATASETS: dict[str, Dataset] = {d.name: d for d in (LIQUIDATIONS, SPOT_TRADES, FUTURES_TRADES)}
 
 
 def create_load_log_sql(database: str) -> str:
