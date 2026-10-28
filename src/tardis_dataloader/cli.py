@@ -6,15 +6,20 @@ import argparse
 import datetime as dt
 import logging
 import sys
+import time
 
 import clickhouse_connect
+from clickhouse_connect.driver.exceptions import ClickHouseError
 
 from tardis_dataloader.config import load_settings
 from tardis_dataloader.datasets import DATASETS
-from tardis_dataloader.files import discover
+from tardis_dataloader.files import SourceFile, discover
 from tardis_dataloader.loader import Loader, LoadError
 
 log = logging.getLogger("tardis_dataloader")
+
+MEMORY_LIMIT_EXCEEDED = 241
+RETRY_DELAYS_S = (60, 300, 900)
 
 
 def positive_int(value: str) -> int:
@@ -73,12 +78,29 @@ def main(argv: list[str] | None = None) -> int:
     total = 0
     for i, f in enumerate(files, 1):
         try:
-            total += loader.load_file(f)
+            total += load_with_retry(loader, f)
         except LoadError as e:
             log.error("[%d/%d] %s", i, len(files), e)
             return 1
     log.info("done: %d files, %d rows", len(files), total)
     return 0
+
+
+def load_with_retry(loader: Loader, source: SourceFile) -> int:
+    """Load a file, retrying after server out-of-memory errors.
+
+    Retrying is safe because every attempt starts from an empty staging table
+    and the target is only touched once the staged day has been verified.
+    """
+    for delay in (*RETRY_DELAYS_S, None):
+        try:
+            return loader.load_file(source)
+        except ClickHouseError as e:
+            if getattr(e, "code", None) != MEMORY_LIMIT_EXCEEDED or delay is None:
+                raise
+            log.warning("%s: server out of memory, retrying in %ds", source.name, delay)
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 if __name__ == "__main__":
