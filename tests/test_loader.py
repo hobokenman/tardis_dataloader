@@ -50,9 +50,10 @@ def test_load_file_stages_then_swaps_partition_then_logs(tmp_path: Path) -> None
     assert _target_commands(client) == [
         f"ALTER TABLE {TARGET} REPLACE PARTITION ID '20220101' FROM {STAGING}"
     ]
+    assert not any("DELETE" in c for c in client.commands())
     logged = client.calls[-1][1][0]
     assert logged[:2] == [LIQUIDATIONS.table, "2022-01-01_PERPETUALS.csv.gz"]
-    assert logged[-1] == 1
+    assert logged[-2:] == [1, 0]
 
 
 def test_load_file_rejects_unexpected_header_before_touching_db(tmp_path: Path) -> None:
@@ -78,11 +79,36 @@ def test_bad_staging_leaves_target_untouched(tmp_path: Path, staged: dict[str, i
     assert "insert" not in client.kinds()
 
 
+def test_invalid_rows_are_deleted_in_staging_before_swap(tmp_path: Path) -> None:
+    client = FakeClient(written=10, invalid=3)
+    assert _loader(client).load_file(_source(tmp_path)) == 7
+    commands = client.commands()
+    delete = f"ALTER TABLE {STAGING} DELETE WHERE {LIQUIDATIONS.invalid_rows}"
+    replace = f"ALTER TABLE {TARGET} REPLACE PARTITION ID '20220101' FROM {STAGING}"
+    assert commands.index(delete) < commands.index(replace)
+    logged = client.calls[-1][1][0]
+    assert logged[-2:] == [7, 3]
+
+
+def test_failed_invalid_row_delete_leaves_target_untouched(tmp_path: Path) -> None:
+    client = FakeClient(written=10, invalid=3, remaining=10)
+    with pytest.raises(LoadError, match="left 10 in staging, expected 7"):
+        _loader(client).load_file(_source(tmp_path))
+    assert _target_commands(client) == []
+    assert "insert" not in client.kinds()
+
+
+def test_day_with_only_invalid_rows_is_dropped(tmp_path: Path) -> None:
+    client = FakeClient(written=2, invalid=2)
+    assert _loader(client).load_file(_source(tmp_path)) == 0
+    assert _target_commands(client) == [f"ALTER TABLE {TARGET} DROP PARTITION ID '20220101'"]
+
+
 def test_empty_file_drops_the_day(tmp_path: Path) -> None:
     client = FakeClient(written=0)
     assert _loader(client).load_file(_source(tmp_path)) == 0
     assert _target_commands(client) == [f"ALTER TABLE {TARGET} DROP PARTITION ID '20220101'"]
-    assert client.calls[-1][1][0][-1] == 0
+    assert client.calls[-1][1][0][-2:] == [0, 0]
 
 
 def test_ensure_tables_recreates_staging_from_target() -> None:

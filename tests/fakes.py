@@ -9,7 +9,9 @@ class FakeClient:
     """Records every call; returns scripted results for the reads the loader makes.
 
     By default the staging table holds exactly the inserted rows, in the
-    partition of the inserted file's day; pass ``staged`` to override.
+    partition of the inserted file's day; pass ``staged`` to override. ``invalid``
+    of those rows match the dataset's invalid predicate, and deleting them leaves
+    ``remaining`` rows (default: the correct count).
     """
 
     def __init__(
@@ -18,15 +20,19 @@ class FakeClient:
         staged: dict[str, int] | None = None,
         log_exists: bool = True,
         log_rows: list[tuple[str, int, int]] | None = None,
+        invalid: int = 0,
+        remaining: int | None = None,
     ) -> None:
         self.written = written
         self.staged = staged
+        self.invalid = invalid
+        self.remaining = remaining
         self.log_exists = log_exists
         self.log_rows = log_rows or []
         self.calls: list[tuple[str, Any]] = []
         self._last_partition = ""
 
-    def command(self, cmd: str, parameters: dict[str, Any] | None = None) -> Any:
+    def command(self, cmd: str, parameters: Any = None, settings: Any = None) -> Any:
         self.calls.append(("command", cmd))
         if cmd.startswith("EXISTS TABLE"):
             return int(self.log_exists)
@@ -34,11 +40,17 @@ class FakeClient:
 
     def query(self, query: str, parameters: dict[str, Any] | None = None) -> Any:
         self.calls.append(("query", query))
-        if "_partition_id" in query:
+        if "GROUP BY _partition_id" in query:
             staged = self.staged
             if staged is None:
                 staged = {self._last_partition: self.written} if self.written else {}
-            return SimpleNamespace(result_rows=list(staged.items()))
+            rows = [
+                (p, n, self.invalid if i == 0 else 0) for i, (p, n) in enumerate(staged.items())
+            ]
+            return SimpleNamespace(result_rows=rows)
+        if query.startswith("SELECT count() FROM"):
+            remaining = self.written - self.invalid if self.remaining is None else self.remaining
+            return SimpleNamespace(result_rows=[(remaining,)])
         return SimpleNamespace(result_rows=self.log_rows)
 
     def raw_insert(self, table: str, **kwargs: Any) -> Any:

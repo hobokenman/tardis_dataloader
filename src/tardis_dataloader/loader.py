@@ -2,7 +2,8 @@
 
 Each file is inserted into an empty staging table with the target's exact
 structure, checked there (exactly one partition, the file's day, holding every
-inserted row), and only then swapped into the target with REPLACE PARTITION.
+inserted row), stripped of the dataset's invalid rows, and only then swapped
+into the target with REPLACE PARTITION.
 A bad file therefore never touches the target, and readers never see a day
 half-loaded. The staging table is shared per dataset, so run one loader per
 dataset at a time.
@@ -15,7 +16,12 @@ import time
 
 from clickhouse_connect.driver.client import Client
 
-from tardis_dataloader.datasets import LOAD_LOG_TABLE, Dataset, create_load_log_sql
+from tardis_dataloader.datasets import (
+    LOAD_LOG_TABLE,
+    Dataset,
+    add_load_log_dropped_sql,
+    create_load_log_sql,
+)
 from tardis_dataloader.files import SourceFile, detect_compression, read_header
 
 log = logging.getLogger(__name__)
@@ -41,6 +47,7 @@ class Loader:
 
     def ensure_tables(self) -> None:
         self.client.command(create_load_log_sql(self.database))
+        self.client.command(add_load_log_dropped_sql(self.database))
         self.client.command(self.dataset.create_table_sql(self.database))
         # Recreated each run so it always matches the target, which REPLACE PARTITION requires.
         self.client.command(f"DROP TABLE IF EXISTS {self.staging}")
@@ -83,12 +90,12 @@ class Loader:
             )
         written = int(summary.written_rows)
 
-        staged = {
-            str(p): int(n)
-            for p, n in self.client.query(
-                f"SELECT _partition_id, count() FROM {self.staging} GROUP BY _partition_id"
-            ).result_rows
-        }
+        invalid = self.dataset.invalid_rows
+        rows = self.client.query(
+            f"SELECT _partition_id, count(), countIf({invalid}) "
+            f"FROM {self.staging} GROUP BY _partition_id"
+        ).result_rows
+        staged = {str(p): int(n) for p, n, _ in rows}
         expected = {partition_id: written} if written else {}
         if staged != expected:
             raise LoadError(
@@ -97,7 +104,23 @@ class Loader:
                 f"local_timestamp day. Target table left unchanged."
             )
 
-        if written:
+        dropped = sum(int(bad) for _, _, bad in rows)
+        kept = written - dropped
+        if dropped:
+            self.client.command(
+                f"ALTER TABLE {self.staging} DELETE WHERE {invalid}",
+                settings={"mutations_sync": 2},
+            )
+            remaining = int(
+                self.client.query(f"SELECT count() FROM {self.staging}").result_rows[0][0]
+            )
+            if remaining != kept:
+                raise LoadError(
+                    f"{source.path}: dropping {dropped} invalid rows left {remaining} in "
+                    f"staging, expected {kept}. Target table left unchanged."
+                )
+
+        if kept:
             self.client.command(
                 f"ALTER TABLE {self.table} "
                 f"REPLACE PARTITION ID '{partition_id}' FROM {self.staging}"
@@ -108,15 +131,26 @@ class Loader:
 
         self.client.insert(
             f"{self.database}.{LOAD_LOG_TABLE}",
-            [[self.dataset.table, source.name, source.day, source.size, source.mtime, written]],
-            column_names=["table", "file", "day", "file_size", "file_mtime", "rows"],
+            [
+                [
+                    self.dataset.table,
+                    source.name,
+                    source.day,
+                    source.size,
+                    source.mtime,
+                    kept,
+                    dropped,
+                ]
+            ],
+            column_names=["table", "file", "day", "file_size", "file_mtime", "rows", "dropped"],
         )
         log.info(
-            "%s: %d rows, %.1f MB %s, %.1fs",
+            "%s: %d rows%s, %.1f MB %s, %.1fs",
             source.name,
-            written,
+            kept,
+            f" ({dropped} invalid dropped)" if dropped else "",
             source.size / 1e6,
             compression,
             time.monotonic() - started,
         )
-        return written
+        return kept

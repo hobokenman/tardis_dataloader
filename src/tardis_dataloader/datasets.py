@@ -30,6 +30,9 @@ class Dataset:
     table: str
     columns: tuple[tuple[str, str], ...]
     order_by: tuple[str, ...]
+    # SQL predicate for source rows that must not be stored; they are deleted in
+    # staging before the swap and counted in the load log's ``dropped`` column.
+    invalid_rows: str = "0"
 
     @property
     def column_names(self) -> list[str]:
@@ -77,6 +80,8 @@ LIQUIDATIONS = Dataset(
         ("amount", "Float64"),
     ),
     order_by=("symbol", "timestamp"),
+    # Source files contain some liquidations with price 0. NOT (x > 0) also catches NaN.
+    invalid_rows="NOT (price > 0)",
 )
 
 DATASETS: dict[str, Dataset] = {d.name: d for d in (LIQUIDATIONS,)}
@@ -91,8 +96,17 @@ def create_load_log_sql(database: str) -> str:
         "    `file_size` UInt64,\n"
         "    `file_mtime` DateTime('UTC'),\n"
         "    `rows` UInt64,\n"
+        "    `dropped` UInt64 DEFAULT 0,\n"
         "    `loaded_at` DateTime64(3, 'UTC') DEFAULT now64(3)\n"
         ")\n"
         "ENGINE = ReplacingMergeTree(loaded_at)\n"
         "ORDER BY (`table`, `file`)"
+    )
+
+
+def add_load_log_dropped_sql(database: str) -> str:
+    """Upgrade a load log created before the ``dropped`` column existed."""
+    return (
+        f"ALTER TABLE `{database}`.`{LOAD_LOG_TABLE}` "
+        "ADD COLUMN IF NOT EXISTS `dropped` UInt64 DEFAULT 0 AFTER `rows`"
     )
