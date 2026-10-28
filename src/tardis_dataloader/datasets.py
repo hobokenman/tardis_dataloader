@@ -81,7 +81,7 @@ LIQUIDATIONS = Dataset(
     ),
     order_by=("symbol", "timestamp"),
     # Source files contain some liquidations with price 0. NOT (x > 0) also catches NaN.
-    invalid_rows="NOT (price > 0)",
+    invalid_rows="NOT (price > 0 AND amount > 0)",
 )
 
 DATASETS: dict[str, Dataset] = {d.name: d for d in (LIQUIDATIONS,)}

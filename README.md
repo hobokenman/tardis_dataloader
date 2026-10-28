@@ -21,7 +21,7 @@ Each daily file replaces its own day partition (`toDate(local_timestamp)`), and 
 files are recorded in `market.tardis_load_log`, so reruns skip files that are already
 loaded. Use `--force` to reload them.
 
-Rows matching a dataset's invalid-row predicate (for liquidations, `price` not > 0) are
+Rows matching a dataset's invalid-row predicate (for liquidations, `price` or `amount` not > 0) are
 dropped before they reach the table; `tardis_load_log.dropped` records how many per file.
 
 | Dataset | Source | Table |
