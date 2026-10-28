@@ -30,7 +30,7 @@ Run `/check` (all of the above) before declaring work done or opening a PR.
 - One file per UTC day: `<exchange>/<data_type>/YYYY-MM-DD_<KIND>.csv.gz`. Directories contain macOS `._*` metadata files — skip them.
 - Detect compression from magic bytes, never the extension: the `binance-futures/trades/*.csv.xz` files are actually zstd.
 - Timestamps are integer microseconds. ClickHouse can't parse them from CSV into `DateTime64` (neither `basic` nor `best_effort`), so they're inserted into `Int64 EPHEMERAL` columns and converted with `fromUnixTimestamp64Micro`.
-- Daily files are split on `local_timestamp` (exchange `timestamp` can fall on the previous day), so tables partition by `toDate(local_timestamp)` and a file reload is DROP PARTITION + insert.
+- Daily files are split on `local_timestamp` (exchange `timestamp` can fall on the previous day), so tables partition by `toDate(local_timestamp)`. Each file is inserted into a `<table>_staging` copy, checked to hold exactly its own day, then swapped in with `REPLACE PARTITION` — never insert straight into a target table.
 - `binance-futures/book_snapshot_5` is parquet, not tardis CSV. Files before 2025-08-10 have all-null timestamps (and the column is misspelled `timstamp`) — out of scope for now.
 
 ## Git

@@ -10,7 +10,7 @@ inserted into an ``<name>_us Int64 EPHEMERAL`` column and stored as
 
 Tables are partitioned by the UTC day of ``local_timestamp``. Tardis splits
 daily files on local_timestamp, so one file maps to exactly one partition,
-which lets a file be reloaded idempotently by dropping its partition first.
+which lets a file be reloaded idempotently by replacing its partition.
 """
 
 from __future__ import annotations

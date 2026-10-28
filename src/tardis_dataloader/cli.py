@@ -17,15 +17,25 @@ from tardis_dataloader.loader import Loader, LoadError
 log = logging.getLogger("tardis_dataloader")
 
 
+def positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Load tardis CSV files into ClickHouse.")
     p.add_argument("dataset", choices=sorted(DATASETS))
     p.add_argument("--start", type=dt.date.fromisoformat, help="first day (YYYY-MM-DD)")
     p.add_argument("--end", type=dt.date.fromisoformat, help="last day (YYYY-MM-DD)")
-    p.add_argument("--limit", type=int, help="load at most N files")
+    p.add_argument("--limit", type=positive_int, help="load at most N files")
     p.add_argument("--force", action="store_true", help="reload files already loaded")
     p.add_argument("--dry-run", action="store_true", help="list files that would be loaded")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.start and args.end and args.start > args.end:
+        p.error(f"--start {args.start} is after --end {args.end}")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
