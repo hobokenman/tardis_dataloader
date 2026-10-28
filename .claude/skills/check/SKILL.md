@@ -7,7 +7,7 @@ Run each step from the repo root, in order, and keep going even if one fails so 
 
 1. `uv run ruff format --check .`
 2. `uv run ruff check .`
-3. `uv run mypy .`
+3. `uv run mypy`
 4. `uv run pytest -q`
 
 If `pyproject.toml` doesn't exist yet, say so and stop. Don't scaffold the project unless asked.
