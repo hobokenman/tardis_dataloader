@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import clickhouse_connect
 import pytest
-from clickhouse_connect.driver.exceptions import DatabaseError
+from clickhouse_connect.driver.exceptions import DatabaseError, OperationalError
 from fakes import FakeClient
 
 from tardis_dataloader import cli
@@ -149,6 +149,13 @@ def test_retries_after_out_of_memory(sleeps: list[float]) -> None:
     assert _retry(loader) == 7
     assert loader.attempts == 3
     assert sleeps == list(cli.RETRY_DELAYS_S[:2])
+
+
+def test_retries_after_lost_connection(sleeps: list[float]) -> None:
+    loader = FlakyLoader([OperationalError("Connection aborted.")])
+    assert _retry(loader) == 7
+    assert loader.attempts == 2
+    assert sleeps == list(cli.RETRY_DELAYS_S[:1])
 
 
 def test_gives_up_after_last_retry(sleeps: list[float]) -> None:
