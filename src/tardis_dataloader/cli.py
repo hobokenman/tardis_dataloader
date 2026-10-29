@@ -9,7 +9,7 @@ import sys
 import time
 
 import clickhouse_connect
-from clickhouse_connect.driver.exceptions import ClickHouseError
+from clickhouse_connect.driver.exceptions import ClickHouseError, OperationalError
 
 from tardis_dataloader.config import load_settings
 from tardis_dataloader.datasets import DATASETS
@@ -59,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
         database=settings.database,
         # Large trade files can stream for a long time before the server replies.
         send_receive_timeout=6 * 3600,
+        # urllib3 applies the connect timeout, not the read timeout, while a request body
+        # is being sent, so a short one aborts an upload whenever the server pauses reading.
+        connect_timeout=600,
     )
     loader = Loader(client, settings.database, dataset)
     if not args.dry_run:
@@ -87,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def load_with_retry(loader: Loader, source: SourceFile) -> int:
-    """Load a file, retrying after server out-of-memory errors.
+    """Load a file, retrying after server out-of-memory errors and lost connections.
 
     Retrying is safe because every attempt starts from an empty staging table
     and the target is only touched once the staged day has been verified.
@@ -96,9 +99,15 @@ def load_with_retry(loader: Loader, source: SourceFile) -> int:
         try:
             return loader.load_file(source)
         except ClickHouseError as e:
-            if getattr(e, "code", None) != MEMORY_LIMIT_EXCEEDED or delay is None:
+            if isinstance(e, OperationalError):
+                reason = "connection to server lost"
+            elif getattr(e, "code", None) == MEMORY_LIMIT_EXCEEDED:
+                reason = "server out of memory"
+            else:
                 raise
-            log.warning("%s: server out of memory, retrying in %ds", source.name, delay)
+            if delay is None:
+                raise
+            log.warning("%s: %s, retrying in %ds", source.name, reason, delay)
             time.sleep(delay)
     raise AssertionError("unreachable")
 
