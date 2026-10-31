@@ -9,7 +9,7 @@ import pytest
 from clickhouse_connect.driver.client import Client
 from fakes import FakeClient
 
-from tardis_dataloader.datasets import FUTURES_TRADES, LIQUIDATIONS
+from tardis_dataloader.datasets import DERIVATIVE_TICKER, FUTURES_TRADES, LIQUIDATIONS
 from tardis_dataloader.files import SourceFile
 from tardis_dataloader.loader import Loader, LoadError
 
@@ -148,3 +148,15 @@ def test_trade_tables_store_numeric_ids() -> None:
     sql = FUTURES_TRADES.create_table_sql("market")
     assert "`id` UInt64 CODEC(Delta, ZSTD(1))" in sql
     assert FUTURES_TRADES.column_names == LIQUIDATIONS.column_names
+
+
+def test_nullable_timestamps_stay_nullable() -> None:
+    sql = DERIVATIVE_TICKER.create_table_sql("market")
+    assert "`funding_timestamp_us` Nullable(Int64) EPHEMERAL" in sql
+    assert "`funding_timestamp` Nullable(DateTime64(6, 'UTC'))" in sql
+    assert "`timestamp_us` Int64 EPHEMERAL" in sql
+    assert DERIVATIVE_TICKER.insert_columns[2:5] == [
+        "timestamp_us",
+        "local_timestamp_us",
+        "funding_timestamp_us",
+    ]
