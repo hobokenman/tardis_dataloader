@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 tardis-load = "tardis_dataloader.cli:main"
+tardis-bars = "tardis_dataloader.cli:bars_main"
 
 [tool.ruff]
 line-length = 100
