@@ -15,8 +15,8 @@ import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 from clickhouse_connect.driver.exceptions import ClickHouseError, OperationalError
 
-from tardis_dataloader.bar_builder import BarBuilder, BuildError
-from tardis_dataloader.bars import BAR_TABLES
+from tardis_dataloader.bar_builder import BarBuilder, BuildError, HourlyBarBuilder
+from tardis_dataloader.bars import BAR_TABLES, HOURLY_BAR_TABLES
 from tardis_dataloader.config import Settings, load_settings
 from tardis_dataloader.datasets import DATASETS
 from tardis_dataloader.files import SourceFile, discover
@@ -101,13 +101,16 @@ def connect(settings: Settings) -> Client:
 
 
 def parse_bars_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build one-minute bars from the loaded tick tables.")
-    p.add_argument("bars", choices=sorted(BAR_TABLES))
+    p = argparse.ArgumentParser(
+        description="Build one-minute bars from the loaded tick tables, or hourly bars "
+        "(*-1h, one month at a time) from the one-minute bars."
+    )
+    p.add_argument("bars", choices=sorted([*BAR_TABLES, *HOURLY_BAR_TABLES]))
     p.add_argument("--start", type=dt.date.fromisoformat, help="first day (YYYY-MM-DD)")
     p.add_argument("--end", type=dt.date.fromisoformat, help="last day (YYYY-MM-DD)")
-    p.add_argument("--limit", type=positive_int, help="build at most N days")
-    p.add_argument("--force", action="store_true", help="rebuild days already built")
-    p.add_argument("--dry-run", action="store_true", help="list days that would be built")
+    p.add_argument("--limit", type=positive_int, help="build at most N days or months")
+    p.add_argument("--force", action="store_true", help="rebuild days or months already built")
+    p.add_argument("--dry-run", action="store_true", help="list what would be built")
     args = p.parse_args(argv)
     if args.start and args.end and args.start > args.end:
         p.error(f"--start {args.start} is after --end {args.end}")
@@ -118,6 +121,8 @@ def bars_main(argv: list[str] | None = None) -> int:
     args = parse_bars_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = load_settings()
+    if args.bars in HOURLY_BAR_TABLES:
+        return hourly_bars_main(args, settings)
     bars = BAR_TABLES[args.bars]
     builder = BarBuilder(connect(settings), settings.database, bars)
     if not args.dry_run:
@@ -155,6 +160,43 @@ def bars_main(argv: list[str] | None = None) -> int:
             log.error("[%d/%d] %s", i, len(todo), e)
             return 1
     log.info("done: %d days, %d bars", len(todo), total)
+    return 0
+
+
+def hourly_bars_main(args: argparse.Namespace, settings: Settings) -> int:
+    bars = HOURLY_BAR_TABLES[args.bars]
+    builder = HourlyBarBuilder(connect(settings), settings.database, bars)
+    if not args.dry_run:
+        builder.ensure_tables()
+
+    months = {
+        m: built
+        for m, built in builder.minute_months().items()
+        if (args.start is None or m >= args.start.replace(day=1))
+        and (args.end is None or m <= args.end)
+    }
+    if not args.force:
+        done = builder.built_months()
+        # A month is rebuilt when any of its minute bars was rebuilt after it.
+        months = {m: built for m, built in months.items() if m not in done or done[m] < built}
+    todo = list(months)
+    if args.limit is not None:
+        todo = todo[: args.limit]
+
+    log.info("%s: %d months to build into %s", bars.name, len(todo), bars.table)
+    if args.dry_run:
+        for month in todo:
+            print(f"{month:%Y-%m}")
+        return 0
+
+    total = 0
+    for i, month in enumerate(todo, 1):
+        try:
+            total += with_retry(f"{month:%Y-%m}", functools.partial(builder.build_month, month))
+        except BuildError as e:
+            log.error("[%d/%d] %s", i, len(todo), e)
+            return 1
+    log.info("done: %d months, %d bars", len(todo), total)
     return 0
 
 

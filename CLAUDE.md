@@ -17,6 +17,7 @@ Always go through `uv` — never call `pip`, `python`, or tools from a global in
 - Types: `uv run mypy` (paths come from pyproject; `mypy .` would scan `.venv`)
 - Load: `uv run tardis-load <dataset> [--start/--end YYYY-MM-DD] [--limit N] [--force] [--dry-run]`
 - Build 1m bars from loaded ticks: `uv run tardis-bars {futures,spot} [same options]` (skips built days unless a source day was reloaded since)
+- Build 1h bars from the 1m bars: `uv run tardis-bars {futures-1h,spot-1h}` (one month per run step; rebuilds months whose 1m bars were rebuilt since)
 
 Run `/check` (all of the above) before declaring work done or opening a PR.
 
@@ -35,11 +36,12 @@ Run `/check` (all of the above) before declaring work done or opening a PR.
 - Source files contain invalid rows (e.g. ~3k liquidations with `price = 0`). Each `Dataset.invalid_rows` predicate is deleted in staging before the swap and counted in `tardis_load_log.dropped` — don't store invalid rows in target tables.
 - `binance-futures/book_snapshot_5` is parquet, not tardis CSV. Files before 2025-08-10 have all-null timestamps (and the column is misspelled `timstamp`) — out of scope for now.
 
-## Minute bars (`tardis_binance_{futures,spot}_bars_1m`)
+## Bars (`tardis_binance_{futures,spot}_bars_{1m,1h}`)
 
 - Columns follow the minute-factor input in `~/workspace/quantlib/quant_lib/factors_min.py` (`amount`, `buy_amount`, `trade_count`, `long_liquidation_vwap`, ...), so the bars drop into those factors unrenamed. `amount` is base quantity; `long_*` liquidations are sell-side.
 - Ticks are bucketed by `local_timestamp` (receive time, the source partition key); `timestamp` is the minute's right edge (close). Tables partition by `toDate(timestamp - INTERVAL 1 MINUTE)`, the source day.
 - Built in SQL per day into `<table>_staging`, checked against `tardis_load_log` (`sum(trade_count)` and liquidation counts must equal the day's source rows), then swapped in with `REPLACE PARTITION`; logged in `tardis_bar_log`.
+- 1h tables resample the 1m tables per `BarColumn.resample` (first/last non-NULL, max/min, sums, quantity-weighted VWAPs), use the same right-edge label, and partition by month (`toYYYYMM(timestamp - INTERVAL 1 MINUTE)`); each month's count totals are checked against the 1m bars.
 - Not available yet: the factors' `bid_price`/`ask_price`/`bid_amount`/`ask_amount` need book data (`book_snapshot_5`, out of scope).
 
 ## Git
