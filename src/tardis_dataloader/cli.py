@@ -6,15 +6,20 @@ import argparse
 import datetime as dt
 import logging
 import sys
+import time
 
 import clickhouse_connect
+from clickhouse_connect.driver.exceptions import ClickHouseError, OperationalError
 
 from tardis_dataloader.config import load_settings
 from tardis_dataloader.datasets import DATASETS
-from tardis_dataloader.files import discover
+from tardis_dataloader.files import SourceFile, discover
 from tardis_dataloader.loader import Loader, LoadError
 
 log = logging.getLogger("tardis_dataloader")
+
+MEMORY_LIMIT_EXCEEDED = 241
+RETRY_DELAYS_S = (60, 300, 900)
 
 
 def positive_int(value: str) -> int:
@@ -54,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
         database=settings.database,
         # Large trade files can stream for a long time before the server replies.
         send_receive_timeout=6 * 3600,
+        # urllib3 applies the connect timeout, not the read timeout, while a request body
+        # is being sent, so a short one aborts an upload whenever the server pauses reading.
+        connect_timeout=600,
     )
     loader = Loader(client, settings.database, dataset)
     if not args.dry_run:
@@ -73,12 +81,35 @@ def main(argv: list[str] | None = None) -> int:
     total = 0
     for i, f in enumerate(files, 1):
         try:
-            total += loader.load_file(f)
+            total += load_with_retry(loader, f)
         except LoadError as e:
             log.error("[%d/%d] %s", i, len(files), e)
             return 1
     log.info("done: %d files, %d rows", len(files), total)
     return 0
+
+
+def load_with_retry(loader: Loader, source: SourceFile) -> int:
+    """Load a file, retrying after server out-of-memory errors and lost connections.
+
+    Retrying is safe because every attempt starts from an empty staging table
+    and the target is only touched once the staged day has been verified.
+    """
+    for delay in (*RETRY_DELAYS_S, None):
+        try:
+            return loader.load_file(source)
+        except ClickHouseError as e:
+            if isinstance(e, OperationalError):
+                reason = "connection to server lost"
+            elif getattr(e, "code", None) == MEMORY_LIMIT_EXCEEDED:
+                reason = "server out of memory"
+            else:
+                raise
+            if delay is None:
+                raise
+            log.warning("%s: %s, retrying in %ds", source.name, reason, delay)
+            time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 if __name__ == "__main__":

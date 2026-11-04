@@ -6,7 +6,8 @@ checked before every load and columns are then inserted positionally.
 Tardis timestamps are integer microseconds since the epoch, which ClickHouse
 cannot parse from CSV into DateTime64. Each ``MICROS`` column is therefore
 inserted into an ``<name>_us Int64 EPHEMERAL`` column and stored as
-``DateTime64(6, 'UTC')`` via ``fromUnixTimestamp64Micro``.
+``DateTime64(6, 'UTC')`` via ``fromUnixTimestamp64Micro``. ``NULLABLE_MICROS``
+does the same for timestamps that may be empty, which are stored as NULL.
 
 Tables are partitioned by the UTC day of ``local_timestamp``. Tardis splits
 daily files on local_timestamp, so one file maps to exactly one partition,
@@ -19,6 +20,12 @@ import datetime as dt
 from dataclasses import dataclass
 
 MICROS = "MICROS"
+NULLABLE_MICROS = "NULLABLE_MICROS"
+# Timestamp pseudo-type -> (ephemeral integer type, stored type).
+TIMESTAMP_TYPES = {
+    MICROS: ("Int64", "DateTime64(6, 'UTC')"),
+    NULLABLE_MICROS: ("Nullable(Int64)", "Nullable(DateTime64(6, 'UTC'))"),
+}
 PARTITION_BY = "toDate(local_timestamp)"
 LOAD_LOG_TABLE = "tardis_load_log"
 
@@ -45,15 +52,16 @@ class Dataset:
     @property
     def insert_columns(self) -> list[str]:
         """Table columns the CSV fields are inserted into, positionally."""
-        return [f"{name}_us" if type_ == MICROS else name for name, type_ in self.columns]
+        return [f"{name}_us" if type_ in TIMESTAMP_TYPES else name for name, type_ in self.columns]
 
     def create_table_sql(self, database: str) -> str:
         defs = []
         for name, type_ in self.columns:
-            if type_ == MICROS:
-                defs.append(f"`{name}_us` Int64 EPHEMERAL")
+            if type_ in TIMESTAMP_TYPES:
+                raw_type, stored_type = TIMESTAMP_TYPES[type_]
+                defs.append(f"`{name}_us` {raw_type} EPHEMERAL")
                 defs.append(
-                    f"`{name}` DateTime64(6, 'UTC') "
+                    f"`{name}` {stored_type} "
                     f"DEFAULT fromUnixTimestamp64Micro(`{name}_us`, 'UTC') CODEC(Delta, ZSTD(1))"
                 )
             else:
@@ -121,7 +129,41 @@ FUTURES_TRADES = Dataset(
     last_day=dt.date(2025, 9, 10),
 )
 
-DATASETS: dict[str, Dataset] = {d.name: d for d in (LIQUIDATIONS, SPOT_TRADES, FUTURES_TRADES)}
+NULLABLE_FLOAT = "Nullable(Float64) CODEC(ZSTD(1))"
+
+DERIVATIVE_TICKER = Dataset(
+    name="derivative-ticker",
+    source_dir="binance-futures/derivative_ticker",
+    file_kind="PERPETUALS",
+    table="tardis_binance_futures_derivative_ticker",
+    # Every field after local_timestamp can be empty (e.g. predicted_funding_rate
+    # always is on Binance); empty fields are stored as NULL.
+    columns=(
+        ("exchange", "LowCardinality(String)"),
+        ("symbol", "LowCardinality(String)"),
+        ("timestamp", MICROS),
+        ("local_timestamp", MICROS),
+        ("funding_timestamp", NULLABLE_MICROS),
+        ("funding_rate", NULLABLE_FLOAT),
+        ("predicted_funding_rate", NULLABLE_FLOAT),
+        ("open_interest", NULLABLE_FLOAT),
+        ("last_price", NULLABLE_FLOAT),
+        ("index_price", NULLABLE_FLOAT),
+        ("mark_price", NULLABLE_FLOAT),
+    ),
+    order_by=("symbol", "timestamp"),
+    # A present value must be sane; NULLs are fine. NOT (x > 0) also catches NaN.
+    invalid_rows=(
+        "NOT (ifNull(last_price, 1) > 0 AND ifNull(index_price, 1) > 0"
+        " AND ifNull(mark_price, 1) > 0 AND ifNull(open_interest, 0) >= 0"
+        " AND isFinite(ifNull(funding_rate, 0)) AND isFinite(ifNull(predicted_funding_rate, 0)))"
+    ),
+    last_day=dt.date(2025, 9, 10),
+)
+
+DATASETS: dict[str, Dataset] = {
+    d.name: d for d in (LIQUIDATIONS, SPOT_TRADES, FUTURES_TRADES, DERIVATIVE_TICKER)
+}
 
 
 def create_load_log_sql(database: str) -> str:

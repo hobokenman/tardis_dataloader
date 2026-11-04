@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import gzip
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import clickhouse_connect
 import pytest
+from clickhouse_connect.driver.exceptions import DatabaseError, OperationalError
 from fakes import FakeClient
 
 from tardis_dataloader import cli
 from tardis_dataloader.config import Settings
 from tardis_dataloader.datasets import FUTURES_TRADES, LIQUIDATIONS
+from tardis_dataloader.files import SourceFile
+from tardis_dataloader.loader import Loader
 
 DAYS = ["2022-01-01", "2022-01-02", "2022-01-03"]
 
@@ -111,3 +115,59 @@ def test_last_day_caps_files_even_with_later_end(
         client = FakeClient(written=0)
         assert _run(monkeypatch, client, *args, dataset="futures-trades") == 0
         assert _inserted_days(client) == ["2025-09-10"]
+
+
+class FlakyLoader:
+    def __init__(self, errors: list[Exception]) -> None:
+        self.errors = errors
+        self.attempts = 0
+
+    def load_file(self, source: object) -> int:
+        self.attempts += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return 7
+
+
+def _oom() -> DatabaseError:
+    return DatabaseError("memory limit exceeded", code=cli.MEMORY_LIMIT_EXCEEDED)
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    calls: list[float] = []
+    monkeypatch.setattr("tardis_dataloader.cli.time.sleep", calls.append)
+    return calls
+
+
+def _retry(loader: FlakyLoader) -> int:
+    return cli.load_with_retry(cast(Loader, loader), cast(SourceFile, SimpleNamespace(name="f")))
+
+
+def test_retries_after_out_of_memory(sleeps: list[float]) -> None:
+    loader = FlakyLoader([_oom(), _oom()])
+    assert _retry(loader) == 7
+    assert loader.attempts == 3
+    assert sleeps == list(cli.RETRY_DELAYS_S[:2])
+
+
+def test_retries_after_lost_connection(sleeps: list[float]) -> None:
+    loader = FlakyLoader([OperationalError("Connection aborted.")])
+    assert _retry(loader) == 7
+    assert loader.attempts == 2
+    assert sleeps == list(cli.RETRY_DELAYS_S[:1])
+
+
+def test_gives_up_after_last_retry(sleeps: list[float]) -> None:
+    loader = FlakyLoader([_oom() for _ in range(len(cli.RETRY_DELAYS_S) + 1)])
+    with pytest.raises(DatabaseError):
+        _retry(loader)
+    assert loader.attempts == len(cli.RETRY_DELAYS_S) + 1
+
+
+def test_other_errors_are_not_retried(sleeps: list[float]) -> None:
+    loader = FlakyLoader([DatabaseError("syntax error", code=62)])
+    with pytest.raises(DatabaseError):
+        _retry(loader)
+    assert loader.attempts == 1
+    assert sleeps == []
